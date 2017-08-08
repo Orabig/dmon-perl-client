@@ -11,12 +11,16 @@ use strict;
 use AnyEvent;
 use AnyEvent::WebSocket::Client;
 
+use AnyEvent::Open3::Simple;
+
 use JSON;
 use Config::JSON;
 use REST::Client;
 
 use Centrifugo::Client;
 
+my $DEFAULT_TIMEOUT=15;
+my $EXEC_UPDATE_INTERVAL=3;
 my $ALIVE_INTERVAL=180;
 our $CONFIG_FILE=$ARGV[0] || ( $^O=~/Win/i ? "C:/Windows/Temp/config.json" : "/tmp/config.json" );
 
@@ -47,6 +51,8 @@ our $HOST_ID;
 our $mainEventLoop;
 our $centrifugoClientHandle;
 
+our %execs;
+our %execHandles;
 
 # Initialize the monitor
 init();
@@ -268,7 +274,7 @@ sub processServerCommand {
 # status (0=OK, 2=Error while running command)
 # retCode : return code of the command
 # stdout, stderr
-sub executeCommand {
+sub executeCommandArchive {
 	my ($cmdline)=@_;
 	use IPC::Open3;
 	my $status=0; # OK
@@ -293,32 +299,103 @@ sub executeCommand {
 	return ($status, $retval, $stdout, $stderr);
 }
 
-sub sendResultFromCommandLine{
-	my($cmdId,$cmdline, $status,$retval,$stdout,$stderr)=@_;
-	my @stdout = split /\n/,$stdout;
-	my @stderr = split /\n/,$stderr;
-	sendMessageToServer('RESULT', {
-		id => $cmdId,
-		cmdline => $cmdline,
-		status => $status,
-		stdout => \@stdout,
-		stderr => \@stderr,
-		retcode => $retval
-	});
+# Forks the execution of a system command. The details of the execution are stored in 
+# $execs{ $cmdId } = { handle=>..., PID=>... , shortCmd=>..., cmdline=>..., stdout=>[], stderr=>[] }
+# and
+# $execHandles { $cmdId } = { exec=>..., update=>...}
+# (these handle keeps the fork and the update timer alive)
+# Input :
+#    cmdId : the ID of the Centrifugo request
+#    $shortCmd : the user-friendly commandline (may be shorter that the full one)
+#    $cmdLine : the command line to execute
+# Output 4 values :
+# status (0=OK, 2=Error while running command)
+# retCode : return code of the command
+# stdout, stderr
+sub executeCommand {
+	my ($cmdId, $shortCmd, $cmdline)=@_;
+	
+	my $done = AnyEvent->condvar;
+
+	my $ipc = AnyEvent::Open3::Simple->new(
+		on_start => sub {
+			my $proc = shift;       # isa AnyEvent::Open3::Simple::Process
+			my $program = shift;    # string
+			my @args = @_;          # list of arguments
+			print STDERR "EXEC[$cmdId] child PID: ", $proc->pid, ", program: ",$program;
+			$execs{$cmdId} = {
+				id => $cmdId,
+				PID => $proc->pid,
+				cmdline => $shortCmd,
+				stdout => [],
+				stderr => [],
+				terminated => 0,
+				timeoutAt => time()+$DEFAULT_TIMEOUT
+			};
+		},
+		on_stdout => sub { 
+			my $proc = shift;       # isa AnyEvent::Open3::Simple::Process
+			my $line = shift;       # string
+			push @{$execs{$cmdId}->{stdout}}, $line;
+			print STDERR 'out: ', $line;
+		},
+		on_stderr => sub {
+			my $proc = shift;       # isa AnyEvent::Open3::Simple::Process
+			my $line = shift;       # string
+			push @{$execs{$cmdId}->{stderr}}, $line;
+			print STDERR 'err: ', $line;
+		},
+		on_exit   => sub {
+			my $proc = shift;       # isa AnyEvent::Open3::Simple::Process
+			my $exit_value = shift; # integer
+			my $signal = shift;     # integer
+			$execs{$cmdId}->{retval} = $exit_value;
+			$execs{$cmdId}->{signal} = $signal;
+			terminateExecutionAndSendResults($cmdId);
+		},
+		on_error => sub {
+			my $error = shift;      # the exception thrown by IPC::Open3::open3
+			my $program = shift;    # string
+			my @args = @_;          # list of arguments
+			warn "error: $error";
+			$execs{$cmdId}->{status} = 2; # CRITICAL
+			$execs{$cmdId}->{error} = $error;
+			$execs{$cmdId}->{errorInfos} = \@args;
+			terminateExecutionAndSendResults($cmdId);
+		},
+	);
+
+	# Send result updates on a regular basis
+	my $updates = AnyEvent->timer(
+		after => $EXEC_UPDATE_INTERVAL,
+		interval => $EXEC_UPDATE_INTERVAL,
+		cb => sub {
+			# Check Timeout
+			if (time()>$execs{$cmdId}->{timeoutAt}) {
+				terminateExecutionAndSendResults($cmdId) ;
+			} else {
+				sendResultForExecution($cmdId);
+			}
+		}
+	);
+	
+	$execHandles{$cmdId} = { handle=> $ipc, update=> $updates };
+	$ipc->run($cmdline);
 }
 
-sub sendServiceFromCommandLine{
-	my($cmdId,$cmdline, $status,$retval,$stdout,$stderr)=@_;
-	my @stdout = split /\n/,$stdout;
-	my @stderr = split /\n/,$stderr;
-	sendMessageToServer('SERVICE', {
-		id => $cmdId,
-		cmdline => $cmdline,
-		status => $status,
-		stdout => \@stdout,
-		stderr => \@stderr,
-		retcode => $retval
-	});
+sub terminateExecutionAndSendResults{
+	my($cmdId)=@_;
+	$execs{$cmdId}->{terminated} = 1;
+	undef $execHandles{$cmdId}->{handle};
+	undef $execHandles{$cmdId}->{update};
+	delete $execHandles{$cmdId};
+	sendResultForExecution($cmdId);
+}
+
+sub sendResultForExecution{
+	my($cmdId)=@_;
+	sendMessageToServer('RESULT', $execs{$cmdId});
+	delete $execs{$cmdId} if $execs{$cmdId}->{terminated};
 }
 
 sub sendResultErrorMessage{
@@ -335,21 +412,21 @@ sub sendResultErrorMessage{
 sub processRunCommand {
 	my ($cmdId, $cmdline)=@_;
 	print "RUN[$cmdId]:$cmdline";
-	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($cmdline) );
+	executeCommand($cmdId, $cmdline, $cmdline);
 }
 
 sub processCheckCommand {
 	my ($cmdId, $cmdline)=@_;
 	print "CHECK[$cmdId]:$cmdline";
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($fullCmdline) );
+	executeCommand($cmdId, $cmdline, $fullCmdline);
 }
 
 sub processInstance {
 	my ($iId, $cmdline)=@_;
 	print "INSTANCE[$iId]:$cmdline";
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	sendServiceFromCommandLine($iId, $cmdline, executeCommand($fullCmdline) );
+	executeCommand($iId, $cmdline, $fullCmdline);
 }
 
 sub processHelpOnCheckCommand {
@@ -360,7 +437,7 @@ sub processHelpOnCheckCommand {
 	}
 	print "HELP[$cmdId]:$cmdline";
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --help $cmdline";
-	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($fullCmdline) );
+	executeCommand($cmdId, $cmdline, $fullCmdline);
 }
 
 sub registerCheckCommand {
