@@ -12,4 +12,4 @@ docker run -d \
    --volume $DIR/tmp:/var/lib/centreon/centplugins \
    -e DMON_API=$DMON_API \
    -e CENT_WS=$CENT_WS \
-   dmon-perl-client /bin/sh -c 'cd /src; perl run.pl'
+   dmon-perl-client /bin/sh -c 'cd /src; perl -Ilib40 run.pl'

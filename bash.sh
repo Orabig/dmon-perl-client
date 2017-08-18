@@ -10,6 +10,7 @@ docker run -it \
    --volume $DIR/src:/src \
    --volume /home/orabig/DEV/centreon-plugins:/var/lib/centreon-plugins \
    --volume $DIR/tmp:/var/lib/centreon/centplugins \
+   --link centrifugo:centrifugo \
    -e DMON_API=$DMON_API \
    -e CENT_WS=$CENT_WS \
    dmon-perl-client bash

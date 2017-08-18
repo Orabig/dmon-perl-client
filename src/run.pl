@@ -20,11 +20,11 @@ use REST::Client;
 use Centrifugo::Client;
 
 # Timeout des executions en arrière plan (fork)
-my $DEFAULT_TIMEOUT=15;
+my $EXECUTION_TIMEOUT=15;
 # Intervalle d'envoi des mises à jour des sorties des fork
 my $EXEC_UPDATE_INTERVAL=3;
 # Intervalle d'envoi d'un message ALIVE au serveur
-my $ALIVE_INTERVAL=60;
+my $ALIVE_INTERVAL=10;
 
 our $CONFIG_FILE=$ARGV[0] || ( $^O=~/Win/i ? "C:/Windows/Temp/config.json" : "/tmp/config.json" );
 
@@ -46,8 +46,9 @@ while (@ALT_CENTREON_ROOT && !-f "$CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS") {
 
 my $API_KEY = "key-123";
 
-my $USER_ID = "First_User_12345";
+my $USER_ID = "Host_User_12345";
 my $TIMESTAMP = time();
+my $INFO = { class => 'host' };
 my $TOKEN;
 
 our $HOST_ID;
@@ -62,10 +63,12 @@ our %execHandles;
 init();
 
 # Ask for a client token
-$TOKEN = askForToken($USER_ID,$TIMESTAMP);
+my $AUTH = askForAuth($USER_ID,$API_KEY,$TIMESTAMP);
+my $TOKEN = $AUTH->{token};
+my $GROUPS = $AUTH->{groups};
 
 # Connects to Centrifugo
-connectToCentrifugo();
+connectToCentrifugo( $GROUPS );
 
 # Start the event loop
 AnyEvent->condvar->recv;
@@ -77,33 +80,45 @@ exit;
 #   makeEvent* subs are launching tasks in the event loop
 
 sub connectToCentrifugo {
+	my ($groups) = @_;
+	
 	$centrifugoClientHandle = Centrifugo::Client->new("$CENTRIFUGO_WS/connection/websocket",
 		debug => 'true',
-		ws_params => {
-			ssl_no_verify => 'true',
-			timeout => 600
-	});
+		debug_ws => 'false',
+		authEndpoint => "$SERVER_BASE_API/auth.php",
+		max_alive_period => 49,
+		refresh_period => 10,
+		retry => 0.5 ,
+	#	ws_params => {
+	#		ssl_no_verify => 'true',
+	#		timeout => 600
+	#}
+	);
 
 	$centrifugoClientHandle->connect(
 		user => $USER_ID,
 		timestamp => $TIMESTAMP,
-		token => $TOKEN
-	) -> on('connect', sub{
+		token => $TOKEN,
+		info => encode_json $INFO
+	)-> on('message', sub{
 		my ($infoRef)=@_;
-		print "Connected to Centrifugo version ".$infoRef->{version};
-		
-		# When connected, client_id() is define, so we can subscribe to our private channel
-		$centrifugoClientHandle->subscribe( channel => '&'.$centrifugoClientHandle->client_id() );
-				
-		# For now : loop and ping the server every 10 s
-		makeServerEventLoop();
-		
-	})-> on('message', sub{
-		my ($infoRef)=@_;
-		processServerCommand($infoRef->{data});
+		# Only read data written into own channel		
+		processServerCommand($infoRef->{data}) if $infoRef->{channel}=~/&/;
+		# print encode_json $infoRef->{data} if $infoRef->{channel}=~/PING/;
 	})-> on('disconnect', sub {
+		print "DISCONNECT !!";
 		undef $centrifugoClientHandle;
 	});
+
+	$centrifugoClientHandle->subscribe( channel => '&' );
+	# $centrifugoClientHandle->subscribe( channel => 'PING' );
+	foreach my $group (@$groups) {
+		# Also subscribe to the private broadcast group channels
+		$centrifugoClientHandle->subscribe( channel => '$broadcast_'.$group );
+	}
+
+	# For now : loop and ping the server every 10 s
+	makeServerEventLoop();
 }
 
 # Creates an event to ping the server every X minutes with an "alive" event
@@ -131,22 +146,25 @@ sub makeServerEventLoop{
 	);
 }
 
-sub askForToken {
-	my ($user,$timestamp)=@_;
+sub askForAuth {
+	my ($user,$apiKey,$timestamp)=@_;
 	my $client = REST::Client->new();
 	$client->setHost($SERVER_BASE_API);
-	
-	my $POST = qq!user=$user&timestamp=$timestamp!;
-	$client->POST("/token.php", $POST, { 'Content-type' => 'application/x-www-form-urlencoded'});
+	my $data = {};
+	$data->{user} = $user;
+	$data->{api_key} = $apiKey;
+	$data->{timestamp} = $timestamp;
+	$data->{info} = $INFO;
+	my $POST = encode_json $data;
+	$client->POST("/token.php", $POST, { 'Content-type' => 'application/json'});
 	print "POST > $POST";
 	print "     < (".$client->responseCode().')';
-	my $token =my $tokenOutput=$client->responseContent();
-	$tokenOutput=~s/^/     < /mg;
-	print $tokenOutput;
+	my $result =$client->responseContent();
+	print "     < $result";
 	if ($client->responseCode() eq 200) {
-		return($token);
+		return(decode_json $result);
 	}
-	print "ERROR < No websocket token";
+	print "ERROR < No websocket token (HTTP:".$client->responseCode().')';
 }
 
 ###########################################################
@@ -206,7 +224,7 @@ sub processServerJsonCommand {
 	my ($jsonCmd) = shift;
 	my $command = 
 		eval {
-			decode_json $jsonCmd;
+			decode_json $jsonCmd; # TODO : Error here (not JSON) when centrifugo shut down
 		} or do {
 			my $error = $@;
 			sendMessageToServer( 'ACK', { id => undef, message => $error });
@@ -218,7 +236,7 @@ sub processServerJsonCommand {
 
 sub getDefaultCommandEnv() {
 	my %ENV;
-	$ENV{ TIMEOUT } = $DEFAULT_TIMEOUT;
+	$ENV{ TIMEOUT } = $EXECUTION_TIMEOUT;
 	return %ENV;
 }
 
