@@ -1,4 +1,4 @@
-#!perl
+#!/usr/bin/perl
 $\=$/;
 
 #
@@ -18,6 +18,8 @@ use Config::JSON;
 use REST::Client;
 
 use Centrifugo::Client;
+
+my $VERSION = "0.1";
 
 # Timeout des executions en arrière plan (fork)
 my $EXECUTION_TIMEOUT=15;
@@ -174,7 +176,7 @@ sub init {
 	$HOST_ID = $config->get('host_id');
 	unless ($HOST_ID) {
 		$HOST_ID = `hostname`; # Works on Linux AND Win32
-		chomp $HOST_ID;
+		chomp $HOST_ID; $HOST_ID =~ s/\W/-/g;
 		$config->set('host_id',$HOST_ID);
 	}
 }
@@ -243,8 +245,8 @@ sub getDefaultCommandEnv() {
 sub processServerCommand {
 	my ($command) = shift;
 	# Envoi d'un ACK
-	my $cmdId = $command->{id};
-	sendMessageToServer( 'ACK', { id => $cmdId });
+	my $cmdId = $command->{cmdId};
+	sendMessageToServer( 'ACK', { cmdId => $cmdId });
 
 	# Traitement de la commande
 	my $cmd = uc $command->{cmd};
@@ -267,8 +269,18 @@ sub processServerCommand {
 				print "[$cmdId] ENV{$1}=$2";
 			}
 
-			if ($cmdline =~ s/^CHECK\b *//i) {
-				processCheckCommand($cmdId, $cmdline, %ENV);
+			if ($cmdline =~ /^!/) {
+				# Special commands starts with !
+				if ($cmdline =~ s/^!HELP\b *//i) {
+					sendResultErrorMessage($cmdId, getHelp());
+				} elsif ($cmdline =~ s/^!CHECK\b *//i) {
+					processCheckCommand($cmdId, $cmdline, %ENV);
+				} elsif ($cmdline =~ s/^!VERSION\b *//i) {
+					sendResultErrorMessage($cmdId, getVersion());
+				} else {
+					$cmdline=~s/ .*//;
+					sendResultErrorMessage($cmdId, "Unknown command '$cmdline'");
+				}
 			} else {
 				processRunCommand($cmdId, $cmdline, %ENV);
 			}
@@ -280,8 +292,9 @@ sub processServerCommand {
 			killExecution($cmdId);
 		}
 		elsif ('REGISTER' eq $cmd) {
+			my $instanceId = $command->{args}->{id};
 			my $cmdline = $command->{args}->{cmdline};
-			registerCheckCommand($cmdId, $cmdline);
+			registerCheckCommand($cmdId, $instanceId, $cmdline);
 		}
 		elsif ('UNREGISTER' eq $cmd) {
 			my $serviceId = $command->{args}->{serviceId};
@@ -312,7 +325,7 @@ sub processServerCommand {
 # retCode : return code of the command
 # stdout, stderr
 sub executeCommand {
-	my ($type, $cmdId, $shortCmd, $cmdline, %ENV)=@_;
+	my ($type, $serviceId, $cmdId, $shortCmd, $cmdline, %ENV)=@_;
 
 	my $ipc = AnyEvent::Open3::Simple->new(
 		on_start => sub {
@@ -322,6 +335,7 @@ sub executeCommand {
 			print STDERR "EXEC[$cmdId] child PID: ", $proc->pid, ", program: ",$program;
 			$execs{$cmdId} = {
 				t => $type,
+				id => $serviceId,
 				cmdId => $cmdId,
 				PID => $proc->pid,
 				cmdline => $shortCmd,
@@ -360,6 +374,9 @@ sub executeCommand {
 			warn "ERROR[$cmdId]: $error";
 			unshift @args, $error;
 			$execs{$cmdId}->{status} = 2; # CRITICAL
+			$execs{$cmdId}->{t} = $type;
+			$execs{$cmdId}->{id} = $serviceId;
+			$execs{$cmdId}->{cmdId} = $cmdId;
 			$execs{$cmdId}->{stdout} = [];
 			$execs{$cmdId}->{stderr} = \@args;
 			terminateExecutionAndSendResults($cmdId);
@@ -425,10 +442,21 @@ sub sendResultForExecution{
 	delete $execs{$cmdId} if $execs{$cmdId}->{terminated};
 }
 
+sub sendResultMessage{
+	my($cmdId,$message)=@_;
+	sendMessageToServer('RESULT', {
+		cmdId => $cmdId,
+		terminated => 1,
+		stdout => [ $message ],
+		stderr => []
+	});
+}
+
 sub sendResultErrorMessage{
 	my($cmdId,$message)=@_;
 	sendMessageToServer('RESULT', {
-		id => $cmdId,
+		cmdId => $cmdId,
+		terminated => 1,
 		stdout => [],
 		stderr => [ $message ]
 	});
@@ -439,21 +467,21 @@ sub sendResultErrorMessage{
 sub processRunCommand {
 	my ($cmdId, $cmdline, %ENV)=@_;
 	print "RUN[$cmdId]:$cmdline";
-	executeCommand('RESULT', $cmdId, $cmdline, $cmdline, %ENV);
+	executeCommand('RESULT', undef, $cmdId, $cmdline, $cmdline, %ENV);
 }
 
 sub processCheckCommand {
 	my ($cmdId, $cmdline, %ENV)=@_;
 	print "CHECK[$cmdId]:$cmdline";
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	executeCommand('RESULT', $cmdId, $cmdline, $fullCmdline, %ENV);
+	executeCommand('RESULT', undef, $cmdId, $cmdline, $fullCmdline, %ENV);
 }
 
 sub processInstance {
 	my ($iId, $cmdline)=@_;
 	print "INSTANCE[$iId]:$cmdline";
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	executeCommand('SERVICE', $iId, $cmdline, $fullCmdline);
+	executeCommand('SERVICE', $iId, undef, $cmdline, $fullCmdline);
 }
 
 sub processHelpOnCheckCommand {
@@ -464,18 +492,21 @@ sub processHelpOnCheckCommand {
 	}
 	print "HELP[$cmdId]:$cmdline";
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --help $cmdline";
-	executeCommand('RESULT', $cmdId, $cmdline, $fullCmdline);
+	executeCommand('RESULT', undef, $cmdId, $cmdline, $fullCmdline);
 }
 
 sub registerCheckCommand {
-	my ($cmdId, $cmdline)=@_;
-	print "REGISTER[$cmdId]:$cmdline";
-	my $instanceId = $cmdline; $instanceId=~s/\W+/_/g;
+	my ($cmdId, $instanceId, $cmdline)=@_;
+	print "REGISTER[$cmdId]: '$instanceId'=$cmdline";
 	my $config = openOrCreateConfigFile();
 	my %instances = $config->addToHash('instances',$instanceId,$cmdline);
-	# Envoi du premier résultat (TODO : change to send instanceId)
-	processInstance($instanceId,$cmdline);
 	makeServerEventLoop();
+	# Envoi un message REGISTERED indiquant la création de l'instance
+	sendMessageToServer('REGISTERED', {
+		cmdId => $cmdId,
+		id => $instanceId,
+		cmdline => $cmdline
+	});
 }
 
 sub unregisterCheckCommand {
@@ -484,5 +515,24 @@ sub unregisterCheckCommand {
 	my $config = openOrCreateConfigFile();
 	$config->deleteFromHash('instances',$instanceId);
 	makeServerEventLoop();
+	# Envoi un message UNREGISTERED indiquant la suppression de l'instance
+	sendMessageToServer('UNREGISTERED', {
+		cmdId => $cmdId,
+		id => $instanceId
+	});
+}
+
+sub getVersion {
+	return "DMon client version $VERSION - $^O";
+}
+
+sub getHelp {
+	my $help=<<EOF;
+!check (...)  : Call a check plugin with the given parameters
+!version      : Display version of this client ( __VERSION__ )
+!help         : Prints this message
+EOF
+	$help=~s/__VERSION__/getVersion()/e;
+	return $help;
 }
 
