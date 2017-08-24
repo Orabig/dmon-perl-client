@@ -10,6 +10,7 @@ docker run -d \
    --volume $DIR/src:/src \
    --volume /home/orabig/DEV/centreon-plugins:/var/lib/centreon-plugins \
    --volume $DIR/tmp:/var/lib/centreon/centplugins \
+   --volume /etc/hostname:/etc/docker-hostname \
    -e DMON_API=$DMON_API \
    -e CENT_WS=$CENT_WS \
-   dmon-perl-client /bin/sh -c 'cd /src; perl -Ilib40 run.pl'
+   dmon-perl-client /bin/sh -c 'cd /src; perl run.pl --daemon'

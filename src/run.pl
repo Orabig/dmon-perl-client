@@ -1,12 +1,25 @@
 #!/usr/bin/perl
 $\=$/;
 
+my $VERSION = "0.2.1";
+
 #
 # Le client du D-MON : une boucle principale tourne toutes les N(180) secondes
 # pour envoyer une commande "ALIVE" au serveur.
 #
 
 use strict;
+
+# Daemon mode. Launch with "perl run.pl --daemon [config.file]". This will launch another perl process with the real client
+# Whenever the client receives a !reload command, it exits and is automatically re-run.
+if ($ARGV[0]=~/--daemon/) {
+	print "Running daemon";
+	my @incs = map "-I $_", @INC;
+	while(1) {
+		qx!perl @incs $0 $ARGV[1]!; # TODO : STDOUT if swallowed here.
+		print "Reloading daemon";
+	}
+}
 
 use AnyEvent;
 use AnyEvent::WebSocket::Client;
@@ -19,14 +32,13 @@ use REST::Client;
 
 use Centrifugo::Client;
 
-my $VERSION = "0.1";
-
 # Timeout des executions en arrière plan (fork)
 my $EXECUTION_TIMEOUT=15;
 # Intervalle d'envoi des mises à jour des sorties des fork
 my $EXEC_UPDATE_INTERVAL=3;
 # Intervalle d'envoi d'un message ALIVE au serveur
-my $ALIVE_INTERVAL=10;
+my $ALIVE_INTERVAL=60 * 1; 
+
 
 our $CONFIG_FILE=$ARGV[0] || ( $^O=~/Win/i ? "C:/Windows/Temp/config.json" : "/tmp/config.json" );
 
@@ -102,11 +114,13 @@ sub connectToCentrifugo {
 		timestamp => $TIMESTAMP,
 		token => $TOKEN,
 		info => encode_json $INFO
-	)-> on('message', sub{
+	)-> on('connect', sub {
+		# Sends an ALIVE message telling we're there
+		sendAliveMessage( {  } );
+	})-> on('message', sub{
 		my ($infoRef)=@_;
 		# Only read data written into own channel		
 		processServerCommand($infoRef->{data}) if $infoRef->{channel}=~/&/;
-		# print encode_json $infoRef->{data} if $infoRef->{channel}=~/PING/;
 	})-> on('disconnect', sub {
 		print "DISCONNECT !!";
 		undef $centrifugoClientHandle;
@@ -136,8 +150,7 @@ sub makeServerEventLoop{
 		interval => $interval,
 		cb => sub {
 			if ($counter==0) {
-				my $response = sendMessageToServer( 'ALIVE', { 'PERIOD', $interval } );
-				processServerJsonCommand($response) if $response;
+				sendAliveMessage( { 'PERIOD', $interval } );
 			} else {
 				my $instanceId = $instanceIDs[ $counter-1 ];
 				my $cmdline = $config->get("instances/$instanceId");
@@ -146,6 +159,12 @@ sub makeServerEventLoop{
 			$counter++; $counter %= $instanceCheckCount;
 		}
 	);
+}
+
+sub sendAliveMessage {
+	my ($data) = @_;
+	my $response = sendMessageToServer( 'ALIVE', $data );
+	processServerJsonCommand($response) if $response;
 }
 
 sub askForAuth {
@@ -175,8 +194,15 @@ sub init {
 	my $config = openOrCreateConfigFile();	
 	$HOST_ID = $config->get('host_id');
 	unless ($HOST_ID) {
-		$HOST_ID = `hostname`; # Works on Linux AND Win32
+		$HOST_ID = qx!hostname!; # Works on Linux AND Win32
 		chomp $HOST_ID; $HOST_ID =~ s/\W/-/g;
+		# If the client is launched from docker with --volume /etc/hostname:/etc/docker-hostname
+		# then the REAL hostname of the client can be used
+		if (-f '/etc/docker-hostname') {
+			my $dockerHostName = qx!cat /etc/docker-hostname!; # linux container
+			$HOST_ID .= '@'.$dockerHostName;
+		}
+
 		$config->set('host_id',$HOST_ID);
 	}
 }
@@ -275,6 +301,8 @@ sub processServerCommand {
 					sendResultErrorMessage($cmdId, getHelp());
 				} elsif ($cmdline =~ s/^!CHECK\b *//i) {
 					processCheckCommand($cmdId, $cmdline, %ENV);
+				}  elsif ($cmdline =~ s/^!RELOAD\b *//i) {
+					exit(0);
 				} elsif ($cmdline =~ s/^!VERSION\b *//i) {
 					sendResultErrorMessage($cmdId, getVersion());
 				} else {
@@ -480,8 +508,9 @@ sub processCheckCommand {
 sub processInstance {
 	my ($iId, $cmdline)=@_;
 	print "INSTANCE[$iId]:$cmdline";
+	$cmdline=~s/^!//;
 	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	executeCommand('SERVICE', $iId, undef, $cmdline, $fullCmdline);
+	executeCommand('SERVICE', $iId, undef, "!$cmdline", $fullCmdline);
 }
 
 sub processHelpOnCheckCommand {
