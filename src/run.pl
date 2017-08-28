@@ -177,7 +177,7 @@ sub askForAuth {
 	$data->{timestamp} = $timestamp;
 	$data->{info} = $INFO;
 	my $POST = encode_json $data;
-	$client->POST("/token.php", $POST, { 'Content-type' => 'application/json'});
+	$client->POST("/api/token.php", $POST, { 'Content-type' => 'application/json'});
 	print "POST > $POST";
 	print "     < (".$client->responseCode().')';
 	my $result =$client->responseContent();
@@ -227,7 +227,7 @@ sub sendMessageToServer {
 	$dataHRef->{ 'client-id' }=$CLIENT_ID;
 	$dataHRef->{ 'host-id' }=$HOST_ID;
 	my $POST = encode_json $dataHRef;
-	$client->POST("/msg.php", $POST, { 'Content-type' => 'application/json'});
+	$client->POST("/api/msg.php", $POST, { 'Content-type' => 'application/json'});
 	print "$type > $POST";
 	print "    < (".$client->responseCode().')';
 	my $response=my $resOutput=$client->responseContent();
