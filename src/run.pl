@@ -7,6 +7,11 @@ my $VERSION = "0.2.1";
 # Le client du D-MON : une boucle principale tourne toutes les N(180) secondes
 # pour envoyer une commande "ALIVE" au serveur.
 #
+# La syntaxe pour lancer le client est
+#
+# perl ./run.pl --daemon <API_KEY> [ <config_file_path> ]
+#
+
 
 use strict;
 
@@ -15,8 +20,9 @@ use strict;
 if ($ARGV[0]=~/--daemon/) {
 	print "Running daemon";
 	my @incs = map "-I $_", @INC;
+	die "Syntax is $0 --daemon <API_KEY> [ <config_file> ]" unless checkApiKey($ARGV[1]);
 	while(1) {
-		qx!perl @incs $0 $ARGV[1]!; # TODO : STDOUT if swallowed here.
+		qx!perl @incs $0 $ARGV[1] $ARGV[2]!; # TODO : STDOUT if swallowed here.
 		print "Reloading daemon";
 	}
 }
@@ -38,9 +44,13 @@ my $EXECUTION_TIMEOUT=15;
 my $EXEC_UPDATE_INTERVAL=3;
 # Intervalle d'envoi d'un message ALIVE au serveur
 my $ALIVE_INTERVAL=60 * 1; 
+# Le delai après lequel une premiere sortie de fork est envoyée
+my $FIRST_RESULT_DELAY=0.8;
 
 
-our $CONFIG_FILE=$ARGV[0] || ( $^O=~/Win/i ? "C:/Windows/Temp/config.json" : "/tmp/config.json" );
+die "Syntax is $0 <API_KEY> [ <config_file> ]" unless checkApiKey($ARGV[0]);
+my $API_KEY = $ARGV[0];
+our $CONFIG_FILE=$ARGV[1] || ( $^O=~/Win/i ? "C:/Windows/Temp/dmon-client.conf" : "/tmp/dmon-client.conf" );
 
 our $SERVER_BASE_API=$ENV{"DMON_API"};
 our $CENTRIFUGO_WS=$ENV{"CENT_WS"};
@@ -52,15 +62,17 @@ die "CENT_WS environment variable must be set" unless $CENTRIFUGO_WS;
 my $CENTREON_PLUGINS_DIR=$ENV{"CENTREON_PLUGIN_ROOT"} || '/var/lib/centreon-plugins';
 my $CENTREON_PLUGINS='centreon_plugins.pl';
 
+our $TOKEN_API_URL = '/api/token.php';
+our $MSG_API_URL = '/api/send-msg.php';
+our $CENT_AUTH_URL = "$SERVER_BASE_API/auth.php";
+
 my @ALT_CENTREON_ROOT = ( "../../centreon-plugins/", "../centreon-plugins/", "./centreon-plugins/");
 
 while (@ALT_CENTREON_ROOT && !-f "$CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS") {
 	$CENTREON_PLUGINS_DIR = shift @ALT_CENTREON_ROOT;
 }
 
-my $API_KEY = "key-123";
-
-my $USER_ID = "Host_User_12345";
+my $USER_ID; # A random string : will be create in init() and stored
 my $TIMESTAMP = time();
 my $INFO = { class => 'host' };
 my $TOKEN;
@@ -88,7 +100,34 @@ connectToCentrifugo( $GROUPS );
 AnyEvent->condvar->recv;
 exit;
 
+sub checkApiKey {
+	my $key = shift;
+	return $key=~/^\w{8}-(\w{4}-){3}\w{12}$/;
+}
 
+sub init {
+	my $config = openOrCreateConfigFile();	
+	$HOST_ID = $config->get('host_id');
+	unless ($HOST_ID) {
+		$HOST_ID = qx!hostname!; # Works on Linux AND Win32
+		chomp $HOST_ID; $HOST_ID =~ s/\W/-/g;
+		# If the client is launched from docker with --volume /etc/hostname:/etc/docker-hostname
+		# then the REAL hostname of the client can be used
+		if (-f '/etc/docker-hostname') {
+			my $dockerHostName = qx!cat /etc/docker-hostname!; # linux container
+			$HOST_ID .= '@'.$dockerHostName;
+		}
+
+		$config->set('host_id',$HOST_ID);
+	}
+	$USER_ID = $config->get('message_client_id');
+	unless($USER_ID) {
+		use Data::UUID;
+		$USER_ID = lc Data::UUID->new->create_str();
+		$config->set('message_client_id',$USER_ID);
+	}
+
+}
 
 ###########################################################
 #   makeEvent* subs are launching tasks in the event loop
@@ -99,7 +138,7 @@ sub connectToCentrifugo {
 	$centrifugoClientHandle = Centrifugo::Client->new("$CENTRIFUGO_WS/connection/websocket",
 		debug => 'true',
 		debug_ws => 'false',
-		authEndpoint => "$SERVER_BASE_API/auth.php",
+		authEndpoint => $CENT_AUTH_URL,
 		max_alive_period => 49,
 		refresh_period => 10,
 		retry => 0.5 ,
@@ -130,7 +169,7 @@ sub connectToCentrifugo {
 	# $centrifugoClientHandle->subscribe( channel => 'PING' );
 	foreach my $group (@$groups) {
 		# Also subscribe to the private broadcast group channels
-		$centrifugoClientHandle->subscribe( channel => '$broadcast_'.$group );
+		$centrifugoClientHandle->subscribe( channel => '$broadcast_'.$group ) if $group;
 	}
 
 	# For now : loop and ping the server every 10 s
@@ -177,9 +216,9 @@ sub askForAuth {
 	$data->{timestamp} = $timestamp;
 	$data->{info} = $INFO;
 	my $POST = encode_json $data;
-	$client->POST("/api/token.php", $POST, { 'Content-type' => 'application/json'});
-	print "POST > $POST";
-	print "     < (".$client->responseCode().')';
+	$client->POST($TOKEN_API_URL, $POST, { 'Content-type' => 'application/json'});
+	print "REQ_TOKEN > $POST";
+	print "          < (".$client->responseCode().')';
 	my $result =$client->responseContent();
 	print "     < $result";
 	if ($client->responseCode() eq 200) {
@@ -189,23 +228,6 @@ sub askForAuth {
 }
 
 ###########################################################
-
-sub init {
-	my $config = openOrCreateConfigFile();	
-	$HOST_ID = $config->get('host_id');
-	unless ($HOST_ID) {
-		$HOST_ID = qx!hostname!; # Works on Linux AND Win32
-		chomp $HOST_ID; $HOST_ID =~ s/\W/-/g;
-		# If the client is launched from docker with --volume /etc/hostname:/etc/docker-hostname
-		# then the REAL hostname of the client can be used
-		if (-f '/etc/docker-hostname') {
-			my $dockerHostName = qx!cat /etc/docker-hostname!; # linux container
-			$HOST_ID .= '@'.$dockerHostName;
-		}
-
-		$config->set('host_id',$HOST_ID);
-	}
-}
 
 sub openOrCreateConfigFile {
 	if (-f $CONFIG_FILE) {
@@ -227,7 +249,7 @@ sub sendMessageToServer {
 	$dataHRef->{ 'client-id' }=$CLIENT_ID;
 	$dataHRef->{ 'host-id' }=$HOST_ID;
 	my $POST = encode_json $dataHRef;
-	$client->POST("/api/msg.php", $POST, { 'Content-type' => 'application/json'});
+	$client->POST($MSG_API_URL, $POST, { 'Content-type' => 'application/json'});
 	print "$type > $POST";
 	print "    < (".$client->responseCode().')';
 	my $response=my $resOutput=$client->responseContent();
@@ -423,7 +445,7 @@ sub executeCommand {
 
 	# Send result updates on a regular basis
 	my $updates = AnyEvent->timer(
-		after => 0.2,
+		after => $FIRST_RESULT_DELAY,
 		interval => $EXEC_UPDATE_INTERVAL,
 		cb => sub {
 			# Check Timeout
@@ -432,7 +454,9 @@ sub executeCommand {
 				killExecution($cmdId) ;
 				undef $execHandles{$cmdId}->{update};
 			} else {
-				sendResultForExecution($cmdId);
+				if ($type ne 'SERVICE') { # Services don't update their result before completion or timeout
+					sendResultForExecution($cmdId);
+				}
 			}
 		}
 	);
