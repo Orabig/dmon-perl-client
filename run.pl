@@ -48,23 +48,20 @@ my $ALIVE_INTERVAL=60 * 1;
 my $FIRST_RESULT_DELAY=0.8;
 
 
-<<<<<<< HEAD
-our $CONFIG_FILE=$ARGV[0] || "./config.json";
-=======
 die "Syntax is $0 <API_KEY> [ <config_file> ]" unless checkApiKey($ARGV[0]);
 my $API_KEY = $ARGV[0];
-our $CONFIG_FILE=$ARGV[1] || ( $^O=~/Win/i ? "C:/Windows/Temp/dmon-client.conf" : "/tmp/dmon-client.conf" );
->>>>>>> origin
+our $CONFIG_FILE=$ARGV[1] || "./config.json";
 
 our $SERVER_BASE_API=$ENV{"DMON_API"} || 'https://dmon.crocoware.com';
-our $CENTRIFUGO_WS=$ENV{"CENT_WS"} || 'wss://dmon.crocoware.com';
+our $CENTRIFUGO_WS=$ENV{"CENT_WS"} || 'wss://centrifugo.crocoware.com';
 
 die "DMON_API environment variable must be set" unless $SERVER_BASE_API;
 die "CENT_WS environment variable must be set" unless $CENTRIFUGO_WS;
 
 
-my $CENTREON_PLUGINS_DIR=$ENV{"CENTREON_PLUGIN_ROOT"} || '/var/lib/centreon-plugins';
+my $CENTREON_PLUGINS_DIR=$ENV{"CENTREON_PLUGIN_ROOT"} || './plugins/centreon-plugins';
 my $CENTREON_PLUGINS='centreon_plugins.pl';
+my $CENTREON_CACHE='./work';
 
 our $TOKEN_API_URL = '/api/token.php';
 our $MSG_API_URL = '/api/send-msg.php';
@@ -529,7 +526,7 @@ sub processRunCommand {
 sub processCheckCommand {
 	my ($cmdId, $cmdline, %ENV)=@_;
 	print "CHECK[$cmdId]:$cmdline";
-	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --statefile-dir $CENTREON_CACHE $cmdline";
 	executeCommand('RESULT', undef, $cmdId, $cmdline, $fullCmdline, %ENV);
 }
 
@@ -537,7 +534,7 @@ sub processInstance {
 	my ($iId, $cmdline)=@_;
 	print "INSTANCE[$iId]:$cmdline";
 	$cmdline=~s/^!//;
-	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --statefile-dir $CENTREON_CACHE $cmdline";
 	executeCommand('SERVICE', $iId, undef, "!$cmdline", $fullCmdline);
 }
 
