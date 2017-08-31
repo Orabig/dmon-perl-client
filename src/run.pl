@@ -40,10 +40,10 @@ my $EXEC_UPDATE_INTERVAL=3;
 my $ALIVE_INTERVAL=60 * 1; 
 
 
-our $CONFIG_FILE=$ARGV[0] || ( $^O=~/Win/i ? "C:/Windows/Temp/config.json" : "/tmp/config.json" );
+our $CONFIG_FILE=$ARGV[0] || "./config.json";
 
-our $SERVER_BASE_API=$ENV{"DMON_API"};
-our $CENTRIFUGO_WS=$ENV{"CENT_WS"};
+our $SERVER_BASE_API=$ENV{"DMON_API"} || 'https://dmon.crocoware.com';
+our $CENTRIFUGO_WS=$ENV{"CENT_WS"} || 'wss://dmon.crocoware.com';
 
 die "DMON_API environment variable must be set" unless $SERVER_BASE_API;
 die "CENT_WS environment variable must be set" unless $CENTRIFUGO_WS;
