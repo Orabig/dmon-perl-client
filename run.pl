@@ -54,23 +54,15 @@ our $CONFIG_FILE=$ARGV[1] || "./config.json";
 
 our $SERVER_BASE_API=$ENV{"DMON_API"} || 'https://dmon.crocoware.com';
 our $CENTRIFUGO_WS=$ENV{"CENT_WS"} || 'wss://centrifugo.crocoware.com';
-
-die "DMON_API environment variable must be set" unless $SERVER_BASE_API;
-die "CENT_WS environment variable must be set" unless $CENTRIFUGO_WS;
-
-
 my $CENTREON_PLUGINS_DIR=$ENV{"CENTREON_PLUGIN_ROOT"} || './plugins/centreon-plugins';
+
+# ASIS : The centreon plugin is the first (and only) one that is usable for now.
+# TODO : Should be evolutive and accept other plugin repositories to extend the possibilitites
 my $CENTREON_PLUGINS='centreon_plugins.pl';
 
 our $TOKEN_API_URL = '/api/token.php';
 our $MSG_API_URL = '/api/send-msg.php';
 our $CENT_AUTH_URL = "$SERVER_BASE_API/auth.php";
-
-my @ALT_CENTREON_ROOT = ( "../../centreon-plugins/", "../centreon-plugins/", "./centreon-plugins/");
-
-while (@ALT_CENTREON_ROOT && !-f "$CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS") {
-	$CENTREON_PLUGINS_DIR = shift @ALT_CENTREON_ROOT;
-}
 
 my $USER_ID; # A random string : will be create in init() and stored
 my $TIMESTAMP = time();
@@ -156,6 +148,8 @@ sub connectToCentrifugo {
 	)-> on('connect', sub {
 		# Sends an ALIVE message telling we're there
 		sendAliveMessage( {  } );
+		# Subscribe to listening private channel
+		subscribeMyChannels( $centrifugoClientHandle, $groups );
 	})-> on('message', sub{
 		my ($infoRef)=@_;
 		# Only read data written into own channel		
@@ -165,15 +159,24 @@ sub connectToCentrifugo {
 		undef $centrifugoClientHandle;
 	});
 
+	# For now : loop and ping the server every N seconds
+	makeServerEventLoop();
+}
+
+sub subscribeMyChannels {
+	my ($centrifugoClientHandle, $groups) = @_;
 	$centrifugoClientHandle->subscribe( channel => '&' );
-	# $centrifugoClientHandle->subscribe( channel => 'PING' );
 	foreach my $group (@$groups) {
 		# Also subscribe to the private broadcast group channels
 		$centrifugoClientHandle->subscribe( channel => '$broadcast_'.$group ) if $group;
 	}
-
-	# For now : loop and ping the server every 10 s
-	makeServerEventLoop();
+	$centrifugoClientHandle->on ('subscribe', sub{
+		my( $dataRef ) = @_;
+		if ($dataRef->{'channel'}=~/^&/) {
+			# Send a message for the console
+			sendResultErrorMessage('_init_', getVersion());
+		}
+	});
 }
 
 # Creates an event to ping the server every X minutes with an "alive" event
