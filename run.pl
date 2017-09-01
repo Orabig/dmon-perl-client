@@ -98,7 +98,17 @@ sub checkApiKey {
 }
 
 sub init {
-	my $config = openOrCreateConfigFile();	
+	my $config = openOrCreateConfigFile();
+	# If the host_ID is not yet known, then fix it
+	getOrSetHostname( $config );
+	# creates a new unique Centrifugo client ID each run
+	createClientId( $config );
+	# Check if the plugin repositories are there.
+	checkOrCreateRepositories();
+}
+
+sub getOrSetHostname {
+	my ($config)=@_;
 	$HOST_ID = $config->get('host_id');
 	unless ($HOST_ID) {
 		$HOST_ID = qx!hostname!; # Works on Linux AND Win32
@@ -107,18 +117,34 @@ sub init {
 		# then the REAL hostname of the client can be used
 		if (-f '/etc/docker-hostname') {
 			my $dockerHostName = qx!cat /etc/docker-hostname!; # linux container
+			chomp $dockerHostName;
 			$HOST_ID .= '@'.$dockerHostName;
 		}
 
 		$config->set('host_id',$HOST_ID);
 	}
+}
+
+sub createClientId {
+	my ($config)=@_;
 	$USER_ID = $config->get('message_client_id');
 	unless($USER_ID) {
 		use Data::UUID;
 		$USER_ID = lc Data::UUID->new->create_str();
 		$config->set('message_client_id',$USER_ID);
 	}
+}
 
+sub checkOrCreateRepositories {
+	# TODO : for now, only check for centreon-plugins
+	unless (-e $CENTREON_PLUGINS_DIR) {
+		# TODO : The url is in plugins/repositories.json and should be used
+		print "Repository Centreon missing :";
+		my $cmd = qq!git clone https://github.com/centreon/centreon-plugins $CENTREON_PLUGINS_DIR!;
+		print "> $cmd";
+		my $output = qx!$cmd!;
+		print $output;
+	}
 }
 
 ###########################################################
@@ -326,8 +352,10 @@ sub processServerCommand {
 					sendResultErrorMessage($cmdId, getHelp());
 				} elsif ($cmdline =~ s/^!CHECK\b *//i) {
 					processCheckCommand($cmdId, $cmdline, %ENV);
-				}  elsif ($cmdline =~ s/^!RELOAD\b *//i) {
+				} elsif ($cmdline =~ s/^!RELOAD\b *//i) {
 					exit(0);
+				} elsif ($cmdline =~ s/^!UPDATE\b *//i) {
+					processRunCommand($cmdId, 'git pull', %ENV);
 				} elsif ($cmdline =~ s/^!VERSION\b *//i) {
 					sendResultErrorMessage($cmdId, getVersion());
 				} else {
@@ -584,8 +612,9 @@ sub getVersion {
 
 sub getHelp {
 	my $help=<<EOF;
-!check (...)  : Call a check plugin with the given parameters
-!reload       : Reload the client (useful after an upgrade)
+!check (...)  : Call a check plugin with the given parameters (try --help)
+!update       : Download the latest version of the client from github
+!reload       : Reload the client (useful after an update)
 !version      : Display version of this client ( __VERSION__ )
 !help         : Prints this message
 EOF
