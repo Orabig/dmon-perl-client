@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 $\=$/;
 
-my $VERSION = "0.2.1";
+my $VERSION = "0.2.2";
 
 #
 # Le client du D-MON : une boucle principale tourne toutes les N(180) secondes
@@ -583,6 +583,7 @@ sub getVersion {
 sub getHelp {
 	my $help=<<EOF;
 !check (...)  : Call a check plugin with the given parameters
+!reload       : Reload the client (useful after an upgrade)
 !version      : Display version of this client ( __VERSION__ )
 !help         : Prints this message
 EOF
