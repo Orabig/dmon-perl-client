@@ -61,7 +61,6 @@ die "CENT_WS environment variable must be set" unless $CENTRIFUGO_WS;
 
 my $CENTREON_PLUGINS_DIR=$ENV{"CENTREON_PLUGIN_ROOT"} || './plugins/centreon-plugins';
 my $CENTREON_PLUGINS='centreon_plugins.pl';
-my $CENTREON_CACHE='./work';
 
 our $TOKEN_API_URL = '/api/token.php';
 our $MSG_API_URL = '/api/send-msg.php';
@@ -526,7 +525,7 @@ sub processRunCommand {
 sub processCheckCommand {
 	my ($cmdId, $cmdline, %ENV)=@_;
 	print "CHECK[$cmdId]:$cmdline";
-	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --statefile-dir $CENTREON_CACHE $cmdline";
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
 	executeCommand('RESULT', undef, $cmdId, $cmdline, $fullCmdline, %ENV);
 }
 
@@ -534,7 +533,7 @@ sub processInstance {
 	my ($iId, $cmdline)=@_;
 	print "INSTANCE[$iId]:$cmdline";
 	$cmdline=~s/^!//;
-	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --statefile-dir $CENTREON_CACHE $cmdline";
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
 	executeCommand('SERVICE', $iId, undef, "!$cmdline", $fullCmdline);
 }
 
